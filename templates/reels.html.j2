@@ -1,0 +1,166 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{% from "macros/user_macros.html.j2" import user_display %}
+
+{% if session.get('user_id') %}
+<div style="z-index: 10; width: 100%; left: 0;"
+  class="d-flex position-absolute w-full align-items-center justify-content-between gap-2">
+  <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadReelModal">Upload</button>
+  <span class="btn btn-light">Page {{ page }}</span>
+</div>
+
+<div class="modal fade" id="uploadReelModal" tabindex="-1" aria-labelledby="uploadReelModal" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="uploadReelModalLabel">Upload a reel</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <form action="/reels/upload" enctype="multipart/form-data" method="POST">
+          <div class="mb-3">
+            <label for="reel-content" class="form-label">Title</label>
+            <input class="form-control" id="reel-content" name="content" required></textarea>
+          </div>
+          <div class="mb-3">
+            <input type="file" name="file" />
+          </div>
+          <button type="submit" class="btn btn-primary">Upload Reel</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% else %}
+<div style="z-index: 10; width: 100%; left: 0;"
+  class="d-flex position-absolute w-full align-items-center justify-content-between gap-2">
+  <span class="d-flex" data-bs-toggle="tooltip" data-bs-placement="bottom" title="You need to be logged in">
+    <button class="btn btn-secondary" disabled>
+      Upload
+    </button>
+  </span>
+  <span class="btn btn-light">Page {{ page }}</span>
+</div>
+{% endif %}
+
+<div class="reels__container">
+  {% for entry in reels %}
+  <div class="card reels__entry" id="reel-{{ entry.reel.id }}">
+    <video id="reel-video-{{ entry.reel.id }}" controls autoplay muted controlslist="nodownload" loop
+      src="/uploads/{{ entry.reel.reel_upload_name }}"></video>
+    <div class="reel__content">
+      <div class="reel__author">
+        <h3 class="card-title mb-0 overflow-hidden">
+          {% if entry.followed_poster %}
+          <a href="/u/{{ entry.reel.user_id }}">
+            {{ user_display(entry.reel.username) }}
+            <span class="text-success p-1" data-toggle="tooltip" data-placement="top"
+              title="You are following this user">
+              ✓
+            </span>
+          </a>
+          {% else %}
+          <a href="/u/{{ entry.reel.user_id }}">{{ user_display(entry.reel.username) }} </a>
+          {% endif %}
+        </h3>
+
+        <div class="reel__bar">
+          <a class="btn btn-light btn-sm" href="/posts/{{ entry.reel.id }}">Comments</a>
+          {% if session.get('user_id') %}
+          <div class="dropdown">
+            <button class="btn btn-sm btn-light text-dark rounded-circle m-0" type="button"
+              id="dropdownMenuButton-{{ entry.reel.id }}" data-bs-toggle="dropdown" aria-expanded="false"
+              title="Add Reaction">
+              +
+            </button>
+            <ul class="dropdown-menu" aria-labelledby="dropdownMenuButton-{{ entry.reel.id }}">
+              {% for reaction_type in reaction_types %}
+              <li>
+                <form action="{{ url_for('add_reaction') }}" method="POST" class="d-inline">
+                  <input type="hidden" name="post_id" value="{{ entry.reel.id }}">
+                  <input type="hidden" name="reaction" value="{{ reaction_type }}">
+                  <button type="submit" class="dropdown-item">
+                    {{ reaction_emojis.get(reaction_type, '👍') }} {{ reaction_type|capitalize }}
+                  </button>
+                </form>
+              </li>
+              {% endfor %}
+            </ul>
+          </div>
+          {% endif %}
+        </div>
+      </div>
+      <p class="m-0">{{ entry.reel.content|truncate(100, True, '...') }}</p>
+      <div class="reactions-display me-2">
+        {% if entry.reactions %}
+        {% for react in entry.reactions %}
+        <span class="text-light me-1" title="{{ react.reaction_type|capitalize }}">
+          {{ reaction_emojis.get(react.reaction_type, '👍') }} {{ react.count }}
+        </span>
+        {% endfor %}
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  <div id="reels-load-more-trigger" class="reels__entry">
+    <div class="spinner-border text-light" role="status">
+      <span class="visually-hidden">Loading...</span>
+    </div>
+  </div>
+</div>
+
+<div id="reels-muted-pressable" class="reels__mutedPressable"></div>
+<div id="reels-muted-alert" class="alert alert-light reels__mutedAlert" role="alert">
+  Press anywhere to enable sound
+</div>
+
+<div style="height: 100vh;"></div>
+
+<script>
+  document.addEventListener("DOMContentLoaded", () => {
+    const videoSelector = 'video[id^="reel-video-"]'
+
+    const handleClick = () => {
+      const videos = document.querySelectorAll(videoSelector);
+      const mutedAlert = document.getElementById('reels-muted-alert');
+      const mutedPressable = document.getElementById('reels-muted-pressable');
+      videos.forEach(video => video.muted = false);
+      mutedAlert.style.opacity = 0;
+      mutedPressable.remove()
+      document.removeEventListener('click', handleClick);
+    };
+
+    document.addEventListener('click', handleClick);
+    document.getElementById('reels-muted-pressable').addEventListener('click', handleClick);
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        const video = entry.target;
+        if (entry.isIntersecting) {
+          video.play();
+        } else {
+          video.currentTime = 0;
+          video.pause();
+        }
+      });
+    }, { threshold: 0.5 });
+
+    document.querySelectorAll(videoSelector).forEach(video => {
+      observer.observe(video)
+    })
+
+    const loadMoreObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const nextPage = Number(new URLSearchParams(window.location.search).get('page') || 1) + 1;
+          window.location.href = `/reels?page=${nextPage}`;
+        }
+      });
+    }, { threshold: 0.5 });
+
+    loadMoreObserver.observe(document.getElementById('reels-load-more-trigger'));
+  });
+</script>
+
+{% endblock %}

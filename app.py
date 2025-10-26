@@ -1,17 +1,38 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+import os
+from flask import (
+    Flask,
+    render_template,
+    request,
+    redirect,
+    send_from_directory,
+    url_for,
+    session,
+    flash,
+    g,
+)
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
-import collections
 import json
 import sqlite3
 import hashlib
 import re
 from datetime import datetime
 import validators
+from werkzeug.utils import secure_filename
+from uuid import uuid4
+
+DATABASE = "database.sqlite"
+UPLOAD_FOLDER = "./uploads"
+ALLOWED_EXTENSIONS = {"mp4", "webm"}
 
 app = Flask(__name__)
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["MAX_CONTENT_LENGTH"] = 512 * 1000 * 1000
 app.secret_key = "123456789"
-DATABASE = "database.sqlite"
+
+if not os.path.exists(app.config["UPLOAD_FOLDER"]):
+    os.makedirs(app.config["UPLOAD_FOLDER"])
+
 
 # Load censorship data
 # WARNING! The censorship.dat file contains disturbing language when decrypted.
@@ -120,10 +141,10 @@ def feed():
     params = []
 
     #  2. Build the Query
-    where_clause = ""
+    where_clause = "WHERE p.is_reel = 0"
     if show == "following" and current_user_id:
-        where_clause = (
-            "WHERE p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
+        where_clause = where_clause + (
+            " AND p.user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
         )
         params.append(current_user_id)
 
@@ -132,7 +153,7 @@ def feed():
 
     if sort == "popular":
         query = f"""
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id,
+            SELECT p.id, p.content, p.created_at, p.is_reel, p.reel_upload_name, u.username, u.id as user_id,
                    IFNULL(r.total_reactions, 0) as total_reactions
             FROM posts p
             JOIN users u ON p.user_id = u.id
@@ -149,7 +170,7 @@ def feed():
         posts = recommend(current_user_id, show == "following" and current_user_id)
     else:  # Default sort is 'new'
         query = f"""
-            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            SELECT p.id, p.content, p.created_at, p.is_reel, p.reel_upload_name, u.username, u.id as user_id
             FROM posts p
             JOIN users u ON p.user_id = u.id
             {where_clause}
@@ -221,6 +242,147 @@ def feed():
     )
 
 
+@app.route("/reels")
+def reels():
+    """Shows a feed of short videos for the user"""
+    try:
+        page = int(request.args.get("page", 1))
+    except ValueError:
+        page = 1
+
+    REELS_PER_PAGE = 10
+    offset = (page - 1) * REELS_PER_PAGE
+    current_user_id = session.get("user_id")
+    query = """
+        SELECT p.id, p.content, p.created_at, p.reel_upload_name, p.is_reel, u.username, u.id as user_id,
+                IFNULL(r.total_reactions, 0) as total_reactions
+        FROM posts p
+        JOIN users u ON p.user_id = u.id
+        LEFT JOIN (
+            SELECT post_id, COUNT(*) as total_reactions FROM reactions GROUP BY post_id
+        ) r ON p.id = r.post_id
+        WHERE p.is_reel = 1
+        ORDER BY total_reactions DESC, p.created_at DESC
+        LIMIT ? OFFSET ?
+    """
+    reels = query_db(query, [REELS_PER_PAGE, offset])
+    if not reels:
+        flash("You watched all reels", "info")
+        return redirect(url_for("reels"))
+
+    reels_data = []
+    for reel in reels:
+        followed_poster = False
+        if current_user_id and reel["user_id"] != current_user_id:
+            follow_check = query_db(
+                "SELECT 1 FROM follows WHERE follower_id = ? AND followed_id = ?",
+                (current_user_id, reel["user_id"]),
+                one=True,
+            )
+            if follow_check:
+                followed_poster = True
+
+        user_reaction = None
+        if current_user_id:
+            reaction_check = query_db(
+                "SELECT reaction_type FROM reactions WHERE user_id = ? AND post_id = ?",
+                (current_user_id, reel["id"]),
+                one=True,
+            )
+            if reaction_check:
+                user_reaction = reaction_check["reaction_type"]  # type: ignore
+
+        reactions = query_db(
+            "SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type",
+            (reel["id"],),
+        )
+        comments_raw = (
+            query_db(
+                "SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC",
+                (reel["id"],),
+            )
+            or []
+        )
+        reel_dict = dict(reel)
+        reel_dict["content"], _ = moderate_content(reel_dict["content"])
+        comments_moderated = []
+        for comment in comments_raw:
+            comment_dict = dict(comment)
+            comment_dict["content"], _ = moderate_content(comment_dict["content"])
+            comments_moderated.append(comment_dict)
+        reels_data.append(
+            {
+                "reel": reel_dict,
+                "reactions": reactions,
+                "user_reaction": user_reaction,
+                "followed_poster": followed_poster,
+                "comments": comments_moderated,
+            }
+        )
+
+    return render_template(
+        "reels.html.j2",
+        reels=reels_data,
+        page=page,
+        per_page=REELS_PER_PAGE,
+        reaction_emojis=REACTION_EMOJIS,
+        reaction_types=REACTION_TYPES,
+    )
+
+
+@app.route("/reels/upload", methods=["POST"])
+def reels_upload():
+    """Shows a feed of short videos for the user"""
+    reels_url = url_for("reels")
+    user_id = session.get("user_id")
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash("You must be logged in to create a reel", "danger")
+        return redirect(reels_url)
+
+    if "file" not in request.files:
+        flash("No file was found in upload", "danger")
+        return redirect(reels_url)
+
+    file = request.files["file"]
+    if not file or file.filename == "" or not file.filename:
+        flash("No file was selected", "danger")
+        return redirect(reels_url)
+
+    if not allowed_file(file.filename):
+        flash("File not supported", "danger")
+        return redirect(reels_url)
+
+    extension = file.filename.split()[-1]
+    filename = str(uuid4()) + "." + extension
+    content = request.form.get("content")
+    moderated_content, _ = moderate_content(content or "")
+
+    if moderated_content and moderated_content.strip():
+        try:
+            db = get_db()
+            db.execute(
+                "INSERT INTO posts (user_id, content, is_reel, reel_upload_name) VALUES (?, ?, ?, ?)",
+                (user_id, moderated_content, 1, filename),
+            )
+            db.commit()
+            file.save(os.path.join(app.config["UPLOAD_FOLDER"], filename))
+            flash("Your video was successfully uploaded!", "success")
+        except Exception as e:
+            flash("Something went wrong: " + str(e), "danger")
+            return redirect(reels_url)
+    else:
+        flash("Post cannot be empty or was fully censored", "warning")
+
+    return redirect(reels_url)
+
+
+@app.route("/uploads/<name>")
+def download_file(name):
+    return send_from_directory(app.config["UPLOAD_FOLDER"], name)
+
+
 @app.route("/posts/new", methods=["POST"])
 def add_post():
     """Handles creating a new post from the feed."""
@@ -235,7 +397,7 @@ def add_post():
     content = request.form.get("content")
 
     # Pass the user's content through the moderation function
-    moderated_content = content
+    moderated_content, _ = moderate_content(content or "")
 
     # Basic validation to ensure post is not empty
     if moderated_content and moderated_content.strip():
@@ -304,7 +466,7 @@ def user_profile(username):
     user["profile"] = moderated_bio
 
     posts_raw = query_db(
-        "SELECT id, content, user_id, created_at FROM posts WHERE user_id = ? ORDER BY created_at DESC",
+        "SELECT id, content, is_reel, reel_upload_name, user_id, created_at FROM posts WHERE user_id = ? ORDER BY created_at DESC",
         (user["id"],),
     )
     posts = []
@@ -406,7 +568,7 @@ def post_detail(post_id):
 
     post_raw = query_db(
         """
-        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+        SELECT p.id, p.content, p.is_reel, p.reel_upload_name, p.created_at, u.username, u.id as user_id
         FROM posts p
         JOIN users u ON p.user_id = u.id
         WHERE p.id = ?
@@ -447,7 +609,6 @@ def post_detail(post_id):
     for comment_raw in comments_raw:
         comment = dict(comment_raw)  # Convert to a dictionary
         # Moderate the content of each comment
-        print(comment["content"])
         moderated_comment_content, _ = moderate_content(comment["content"])
         comment["content"] = moderated_comment_content
         comments.append(comment)
@@ -828,7 +989,7 @@ def admin_dashboard():
 
     posts_raw = query_db(
         f"""
-        SELECT p.id, p.content, p.created_at, u.username, u.created_at as user_created_at
+        SELECT p.id, p.content, p.is_reel, p.reel_upload_name, p.created_at, u.username, u.created_at as user_created_at
         FROM posts p JOIN users u ON p.user_id = u.id
         ORDER BY p.id DESC -- Order by ID for consistent pagination before risk sort
         LIMIT ? OFFSET ?
@@ -976,6 +1137,10 @@ def loop_color(user_id):
 # ----- Functions to be implemented are below
 
 
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
 # Task 3.1
 def recommend(user_id: int, filter_following: bool):
     """
@@ -1001,7 +1166,7 @@ def recommend(user_id: int, filter_following: bool):
         """Return a set of hashtags in a post."""
         return set(re.findall(r"#\w+", text))
 
-    posts = list(map(dict, query_db("SELECT * from posts")))  # type: ignore
+    posts = list(map(dict, query_db("SELECT * FROM posts WHERE posts.is_reel = 0")))  # type: ignore
     liked_posts: list = list(
         map(
             dict,

@@ -1,0 +1,116 @@
+body:has(.reels__container) {
+	overflow: hidden;
+}
+
+.reels__container {
+	height: calc(100vh - 48px);
+	overflow: hidden scroll;
+	scroll-snap-type: y mandatory;
+	scroll-padding-top: 0;
+	position: absolute;
+	transform: translateX(-50%);
+	left: 50%;
+	top: -16px;
+	width: 100vw;
+	scrollbar-width: none;
+	place-content: center;
+	padding-top: 32px;
+	scroll-padding-top: 32px;
+}
+
+.reels__entry {
+	--reels-player-height: calc(100vh - 48px - 64px);
+	height: var(--reels-player-height);
+	overflow: hidden;
+	position: relative;
+	left: 50%;
+	scroll-padding-top: 32px;
+	min-height: 576px;
+	min-width: 315px;
+	max-width: 100%;
+	scroll-snap-align: start;
+	scroll-snap-stop: always;
+	contain: size layout;
+	margin: 0;
+	margin-bottom: 16px;
+	border-radius: 16px;
+	aspect-ratio: 9 / 16;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	transform: translateX(-50%);
+	background-color: black;
+}
+
+.reel__author {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	width: 100%;
+	gap: 8px;
+}
+
+.reel__author span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	width: 100%;
+}
+
+.reels__entry video {
+	width: 100%;
+}
+
+.reel__bar {
+	display: flex;
+	gap: 8px;
+}
+
+.reel__content {
+	position: absolute;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	top: 0;
+	left: 0;
+	padding: 16px;
+	color: white;
+	transition: all 200ms ease;
+	font-size: 16px;
+	width: 100%;
+	text-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+}
+
+.reels__mutedPressable {
+	position: absolute;
+	top: -16px;
+	left: 50%;
+	transform: translateX(-50%);
+	width: 100vw;
+	height: 100vh;
+	z-index: 1000;
+}
+
+.reels__mutedAlert {
+	position: absolute;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 100;
+	user-select: none;
+	pointer-events: none;
+	text-align: center;
+	transition: opacity 200ms ease;
+}
+
+.reel__standalone {
+	max-height: calc(100vh - 300px);
+	overflow: hidden;
+	aspect-ratio: 9 / 16;
+	border-radius: 16px;
+	margin-top: 12px;
+	margin-bottom: 12px;
+}
+
+.reel__standalone video {
+	width: 100%;
+}
